@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 
+import { killProcessGroup } from './process-group-kill.js';
 import { startPreviewProxy, type PreviewProxyHandle } from './preview-proxy.js';
 
 export type PreviewState = 'idle' | 'booting' | 'live' | 'crashed' | 'stopped';
@@ -28,6 +29,8 @@ export interface PreviewSpawnOptions {
   env?: NodeJS.ProcessEnv;
   /** Internal: passed to node:child_process.spawn for shell-mode commands. */
   shell?: boolean;
+  /** When true, the child becomes a process-group leader so we can signal the whole tree. */
+  detached?: boolean;
 }
 
 export interface StartPreviewOptions {
@@ -100,10 +103,10 @@ export async function startPreview(opts: StartPreviewOptions): Promise<PreviewHa
     NODE_ENV: 'development',
   };
   const child = opts.startCommandLine
-    ? spawn(opts.startCommandLine, [], { cwd: opts.cwd, env, shell: true } as PreviewSpawnOptions)
+    ? spawn(opts.startCommandLine, [], { cwd: opts.cwd, env, shell: true, detached: true } as PreviewSpawnOptions)
     : (() => {
         const cmd = opts.startCommand ?? ['pnpm', 'dev'];
-        return spawn(cmd[0]!, cmd.slice(1), { cwd: opts.cwd, env });
+        return spawn(cmd[0]!, cmd.slice(1), { cwd: opts.cwd, env, detached: true });
       })();
   const pid = child.pid ?? -1;
   const stateRef: { current: PreviewState } = { current: 'booting' };
@@ -159,7 +162,7 @@ export async function startPreview(opts: StartPreviewOptions): Promise<PreviewHa
     state: stateRef.current,
     async stop() {
       try {
-        child.kill('SIGTERM');
+        killProcessGroup(child, 'SIGTERM');
       } catch {
         // ignore
       }

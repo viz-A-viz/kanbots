@@ -1,3 +1,5 @@
+export { killProcessGroup, waitForChildWithTimeout } from './process-group-kill.js';
+
 export const PACKAGE_NAME = '@kanbots/dispatcher';
 
 export {

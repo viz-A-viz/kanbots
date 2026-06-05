@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
+import { killProcessGroup, waitForChildWithTimeout } from './process-group-kill.js';
 
 export type CheckKind = 'typecheck' | 'tests' | 'lint' | 'e2e';
 export type CheckStatus = 'idle' | 'running' | 'pass' | 'fail';
@@ -20,7 +21,7 @@ export interface RunCheckOptions {
   cwd: string;
   command: CheckCommand;
   timeoutMs?: number;
-  spawn?: (command: string, args: readonly string[], options: { cwd: string }) => ChildProcess;
+  spawn?: (command: string, args: readonly string[], options: { cwd: string; detached?: boolean }) => ChildProcess;
 }
 
 const DEFAULT_TIMEOUT_MS = 5 * 60_000;
@@ -55,40 +56,41 @@ export function resolveCheckCommand(
 export async function runCheck(opts: RunCheckOptions): Promise<CheckResult> {
   const spawn = opts.spawn ?? nodeSpawn;
   const start = Date.now();
-  return await new Promise<CheckResult>((resolve) => {
-    const child = spawn(opts.command.command, opts.command.args, { cwd: opts.cwd });
-    let stdout = '';
-    let stderr = '';
-    let killed = false;
+  const child = spawn(opts.command.command, opts.command.args, { cwd: opts.cwd, detached: true });
+  let stdout = '';
+  let stderr = '';
+  let killed = false;
 
-    const timer = setTimeout(() => {
-      killed = true;
-      child.kill('SIGTERM');
-    }, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
-    });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8');
-    });
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({
-        kind: opts.command.kind,
-        status: 'fail',
-        durationMs: Date.now() - start,
-        summary: `spawn error: ${err.message}`,
-      });
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      const durationMs = Date.now() - start;
-      const status: 'pass' | 'fail' = !killed && code === 0 ? 'pass' : 'fail';
-      const summary = summarize(stdout, stderr, code, killed);
-      resolve({ kind: opts.command.kind, status, durationMs, summary });
-    });
+  child.stdout?.on('data', (chunk: Buffer) => {
+    stdout += chunk.toString('utf8');
   });
+  child.stderr?.on('data', (chunk: Buffer) => {
+    stderr += chunk.toString('utf8');
+  });
+
+  let exitCode: number;
+  try {
+    exitCode = await waitForChildWithTimeout(child, timeoutMs, {
+      onTimeout: () => {
+        killed = true;
+      },
+    });
+  } catch (err) {
+    const durationMs = Date.now() - start;
+    return {
+      kind: opts.command.kind,
+      status: 'fail',
+      durationMs,
+      summary: `spawn error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  const durationMs = Date.now() - start;
+  const status: 'pass' | 'fail' = !killed && exitCode === 0 ? 'pass' : 'fail';
+  const summary = summarize(stdout, stderr, exitCode, killed);
+  return { kind: opts.command.kind, status, durationMs, summary };
 }
 
 function summarize(stdout: string, stderr: string, code: number | null, killed: boolean): string {

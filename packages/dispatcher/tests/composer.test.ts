@@ -15,6 +15,7 @@ describe('createComposer', () => {
     const call = fake.calls[0]!;
     expect(call.command).toBe('claude');
     expect(call.cwd).toBe('/tmp/repo');
+    expect(call.detached).toBe(true);
     expect(call.args).toContain('-p');
     expect(call.args).toContain('--output-format');
     expect(call.args).toContain('json');
@@ -111,6 +112,7 @@ describe('createComposer', () => {
 
     await expect(draft({ description: 'x' })).rejects.toThrowError(/timed out/);
     expect(fake.killSignals).toContain('SIGTERM');
+    expect(fake.calls[0]!.detached).toBe(true);
   });
 
   it('surfaces spawn errors (e.g. ENOENT for missing claude)', async () => {

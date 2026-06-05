@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
+import { killProcessGroup, waitForChildWithTimeout } from './process-group-kill.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -220,17 +221,12 @@ async function runClaudeForDraftedIssue(opts: RunClaudeOptions): Promise<Drafted
     'Read,Glob,Grep',
   ];
 
-  const child = opts.spawn(opts.command, args, { cwd: opts.cwd });
+  const child = opts.spawn(opts.command, args, { cwd: opts.cwd, detached: true });
   let stdout = '';
   let stderr = '';
   let killedByTimeout = false;
   let resultEvent: unknown = null;
   let lineBuf = '';
-
-  const timer = setTimeout(() => {
-    killedByTimeout = true;
-    child.kill('SIGTERM');
-  }, opts.timeoutMs);
 
   const handleStreamLine = (line: string): void => {
     const trimmed = line.trim();
@@ -291,21 +287,15 @@ async function runClaudeForDraftedIssue(opts: RunClaudeOptions): Promise<Drafted
   });
 
   if (!child.stdin) {
-    clearTimeout(timer);
     throw new ComposerError('failed to open stdin to claude');
   }
   child.stdin.write(opts.stdin);
   child.stdin.end();
 
-  const exitCode: number = await new Promise((resolve, reject) => {
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve(code ?? 0);
-    });
+  const exitCode: number = await waitForChildWithTimeout(child, opts.timeoutMs, {
+    onTimeout: () => {
+      killedByTimeout = true;
+    },
   });
 
   if (streaming && lineBuf.length > 0) {
@@ -582,17 +572,12 @@ async function spawnCodex(opts: RunCodexOptions, schemaPath: string): Promise<Dr
     `${opts.systemPrompt}${CODEX_PROMPT_DELIMITER}${opts.userPrompt}`,
   ];
 
-  const child = opts.spawn(opts.command, args, { cwd: opts.cwd });
+  const child = opts.spawn(opts.command, args, { cwd: opts.cwd, detached: true });
   let stderr = '';
   let killedByTimeout = false;
   let agentMessageText: string | null = null;
   let turnError: string | null = null;
   let lineBuf = '';
-
-  const timer = setTimeout(() => {
-    killedByTimeout = true;
-    child.kill('SIGTERM');
-  }, opts.timeoutMs);
 
   const handleLine = (line: string): void => {
     const trimmed = line.trim();
@@ -650,15 +635,10 @@ async function spawnCodex(opts: RunCodexOptions, schemaPath: string): Promise<Dr
   // doesn't wait on it.
   child.stdin?.end();
 
-  const exitCode: number = await new Promise((resolve, reject) => {
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve(code ?? 0);
-    });
+  const exitCode: number = await waitForChildWithTimeout(child, opts.timeoutMs, {
+    onTimeout: () => {
+      killedByTimeout = true;
+    },
   });
 
   if (lineBuf.length > 0) {

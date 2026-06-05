@@ -1,5 +1,6 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { z } from 'zod';
+import { waitForChildWithTimeout } from '@kanbots/dispatcher';
 import type { AgentRun, LearningTag, Store } from '@kanbots/local-store';
 import { CURATOR_JSON_SCHEMA, CURATOR_SYSTEM_PROMPT, renderCuratorPrompt } from './prompt.js';
 
@@ -48,7 +49,7 @@ const claudeResultSchema = z
 export type SpawnFn = (
   command: string,
   args: readonly string[],
-  options: { cwd: string; env?: NodeJS.ProcessEnv },
+  options: { cwd: string; env?: NodeJS.ProcessEnv; detached?: boolean },
 ) => ChildProcess;
 
 export interface CreateCuratorOptions {
@@ -220,14 +221,10 @@ async function runClaudeJsonSchema(opts: RunClaudeOpts): Promise<RunClaudeOutput
     '--json-schema',
     JSON.stringify(CURATOR_JSON_SCHEMA),
   ];
-  const child = opts.spawn(opts.command, args, { cwd: opts.cwd });
+  const child = opts.spawn(opts.command, args, { cwd: opts.cwd, detached: true });
   let stdout = '';
   let stderr = '';
   let killedByTimeout = false;
-  const timer = setTimeout(() => {
-    killedByTimeout = true;
-    child.kill('SIGTERM');
-  }, CURATOR_TIMEOUT_MS);
   child.stdout?.on('data', (chunk: Buffer) => {
     stdout += chunk.toString('utf8');
   });
@@ -235,21 +232,15 @@ async function runClaudeJsonSchema(opts: RunClaudeOpts): Promise<RunClaudeOutput
     stderr += chunk.toString('utf8');
   });
   if (!child.stdin) {
-    clearTimeout(timer);
     throw new CuratorError('failed to open stdin to claude');
   }
   child.stdin.write(opts.prompt);
   child.stdin.end();
 
-  const exitCode: number = await new Promise((resolve, reject) => {
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve(code ?? 0);
-    });
+  const exitCode: number = await waitForChildWithTimeout(child, CURATOR_TIMEOUT_MS, {
+    onTimeout: () => {
+      killedByTimeout = true;
+    },
   });
   if (killedByTimeout) {
     throw new CuratorError(`curator timed out after ${CURATOR_TIMEOUT_MS}ms`, stderr);

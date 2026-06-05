@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { z } from 'zod';
 import { ComposerError, type SpawnFn } from './composer.js';
+import { waitForChildWithTimeout } from './process-group-kill.js';
 
 export interface SentryAnalyzerStackFrame {
   filename: string | null;
@@ -143,15 +144,10 @@ async function runClaudeForSentrySuggestion(opts: RunClaudeOptions): Promise<Sen
     'Read,Glob,Grep',
   ];
 
-  const child = opts.spawn(opts.command, args, { cwd: opts.cwd });
+  const child = opts.spawn(opts.command, args, { cwd: opts.cwd, detached: true });
   let stdout = '';
   let stderr = '';
   let killedByTimeout = false;
-
-  const timer = setTimeout(() => {
-    killedByTimeout = true;
-    child.kill('SIGTERM');
-  }, opts.timeoutMs);
 
   child.stdout?.on('data', (chunk: Buffer) => {
     stdout += chunk.toString('utf8');
@@ -161,21 +157,15 @@ async function runClaudeForSentrySuggestion(opts: RunClaudeOptions): Promise<Sen
   });
 
   if (!child.stdin) {
-    clearTimeout(timer);
     throw new ComposerError('failed to open stdin to claude');
   }
   child.stdin.write(opts.stdin);
   child.stdin.end();
 
-  const exitCode: number = await new Promise((resolve, reject) => {
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve(code ?? 0);
-    });
+  const exitCode: number = await waitForChildWithTimeout(child, opts.timeoutMs, {
+    onTimeout: () => {
+      killedByTimeout = true;
+    },
   });
 
   if (killedByTimeout) {
